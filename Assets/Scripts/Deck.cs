@@ -1,32 +1,41 @@
-﻿using UnityEngine;
+﻿using System.Collections.Generic;
+using UnityEngine;
 using UnityEngine.UI;
 
 public class Deck : MonoBehaviour
 {
+    [Header("Configuración de Cartas")]
     public Sprite[] faces;
+    public int[] values = new int[52];
+    private int cardIndex = 0;
+
+    [Header("Referencias de Juego")]
     public GameObject dealer;
     public GameObject player;
+    private CardHand dealerHand;
+    private CardHand playerHand;
+
+    [Header("UI Interfaz")]
     public Button hitButton;
     public Button stickButton;
     public Button playAgainButton;
     public Text finalMessage;
     public Text probMessage;
+    public Text bankMessage;
+    public Text betMessage;
 
-    public int[] values = new int[52];
-    int cardIndex = 0;
-
+    [Header("Lógica de Apuestas")]
     private int banca = 1000;
     private int apuestaActual = 10;
-
-    private CardHand dealerHand;
-    private CardHand playerHand;
+    private bool gameOver = false;
+    private bool dealerFirstCardHidden = true;
 
     private void Awake()
     {
         dealerHand = dealer.GetComponent<CardHand>();
         playerHand = player.GetComponent<CardHand>();
         InitCardValues();
-
+        UpdateMoneyUI();
     }
 
     private void Start()
@@ -37,27 +46,23 @@ public class Deck : MonoBehaviour
 
     private void InitCardValues()
     {
-        /// Se asume orden por palo:
-        // A,2,3,4,5,6,7,8,9,10,J,Q,K  x4
         for (int i = 0; i < values.Length; i++)
         {
-            int rank = i % 13;
-
-            if (rank == 0)           // As
-                values[i] = 11;
-            else if (rank >= 10)     // J, Q, K
-                values[i] = 10;
-            else                     // 2..10
-                values[i] = rank + 1;
+            int rank = (i % 13) + 1;
+            // Guardamos el As siempre como 11 inicialmente. 
+            // La función CalculateHandValue se encargará de convertirlo a 1 si es necesario.
+            if (rank == 1) values[i] = 11;
+            else if (rank >= 10) values[i] = 10;
+            else values[i] = rank;
         }
     }
 
     private void ShuffleCards()
     {
-        // Fisher-Yates sincronizando faces y values
-        for (int i = faces.Length - 1; i > 0; i--)
+        cardIndex = 0;
+        for (int i = 0; i < faces.Length; i++)
         {
-            int randomIndex = Random.Range(0, i + 1);
+            int randomIndex = Random.Range(i, faces.Length);
 
             Sprite tempFace = faces[i];
             faces[i] = faces[randomIndex];
@@ -69,220 +74,226 @@ public class Deck : MonoBehaviour
         }
     }
 
+    // Método de seguridad para obtener cartas
+    private void VerifyDeck()
+    {
+        if (cardIndex >= faces.Length)
+        {
+            Debug.Log("Mazo vacío, barajando de nuevo...");
+            ShuffleCards();
+        }
+    }
+
     void StartGame()
     {
-        // Reparto inicial:
-        // jugador, dealer, jugador, dealer
+        // 1. Validaciones previas
+        if (banca < 10 && banca < apuestaActual)
+        {
+            finalMessage.text = "Banca insuficiente.";
+            ToggleButtons(false, false, false);
+            return;
+        }
+
+        // 2. Reset de estado
+        gameOver = false;
+        dealerFirstCardHidden = true;
+        finalMessage.text = "";
+        ToggleButtons(true, true, false);
+
+        // 3. Cobrar apuesta
+        banca -= apuestaActual;
+        UpdateMoneyUI();
+
+        // 4. Repartir inicial
         for (int i = 0; i < 2; i++)
         {
             PushPlayer();
             PushDealer();
         }
 
-        // Comprobar blackjack inicial
-        if (playerHand.points == 21 || dealerHand.points == 21)
-        {
-            // Mostrar la carta oculta del dealer
-            dealerHand.InitialToggle();
+        // 5. Verificar Blackjacks Naturales
+        CheckInitialBlackjack();
+    }
 
-            if (playerHand.points == 21 && dealerHand.points == 21)
+    private void CheckInitialBlackjack()
+    {
+        int pPoints = CalculateHandValue(GetHandValues(playerHand));
+        int dPoints = CalculateHandValue(GetHandValues(dealerHand));
+
+        if (pPoints == 21 || dPoints == 21)
+        {
+            if (pPoints == 21 && dPoints == 21)
             {
-                EndRound("Empate. Ambos tienen Blackjack.", 0);
+                banca += apuestaActual; // Devolver apuesta
+                EndGame("Empate: ambos tienen Blackjack.");
             }
-            else if (playerHand.points == 21)
+            else if (pPoints == 21)
             {
-                EndRound("Blackjack. Gana el jugador.", apuestaActual);
+                // El Blackjack suele pagar 3 a 2, aquí lo dejamos 2 a 1 (apuesta * 2)
+                banca += apuestaActual * 2;
+                EndGame("¡Blackjack! Ganas.");
             }
             else
             {
-                EndRound("Blackjack del dealer. Pierdes.", -apuestaActual);
+                EndGame("Dealer tiene Blackjack. Pierdes.");
             }
+        }
+    }
+
+    public void Hit()
+    {
+        if (gameOver) return;
+
+        PushPlayer();
+
+        if (CalculateHandValue(GetHandValues(playerHand)) > 21)
+        {
+            EndGame("Te pasas de 21. Pierdes.");
+        }
+    }
+
+    public void Stand()
+    {
+        if (gameOver) return;
+
+        RevealDealerCard();
+
+        // El Dealer pide hasta tener 17 o más
+        while (CalculateHandValue(GetHandValues(dealerHand)) < 17)
+        {
+            PushDealer();
+        }
+
+        int pPoints = CalculateHandValue(GetHandValues(playerHand));
+        int dPoints = CalculateHandValue(GetHandValues(dealerHand));
+
+        if (dPoints > 21)
+        {
+            banca += apuestaActual * 2;
+            EndGame("El dealer se pasa. Ganas.");
+        }
+        else if (dPoints > pPoints)
+        {
+            EndGame("Gana el dealer.");
+        }
+        else if (dPoints < pPoints)
+        {
+            banca += apuestaActual * 2;
+            EndGame("¡Ganas!");
         }
         else
         {
-            CalculateProbabilities();
+            banca += apuestaActual;
+            EndGame("Empate.");
         }
     }
 
-    private void CalculateProbabilities()
+    private void PushDealer()
     {
-        int remainingCards = values.Length - cardIndex;
-
-        if (remainingCards <= 0)
-        {
-            probMessage.text = "No quedan cartas en el mazo.";
-            return;
-        }
-
-        int safeCards = 0;       // cartas con las que no se pasa
-        int blackjackCards = 0;  // cartas con las que llega a 21
-        int bustCards = 0;       // cartas con las que se pasa
-
-        for (int i = cardIndex; i < values.Length; i++)
-        {
-            int simulatedPoints = SimulatePlayerPointsAfterDraw(values[i]);
-
-            if (simulatedPoints > 21)
-            {
-                bustCards++;
-            }
-            else
-            {
-                safeCards++;
-
-                if (simulatedPoints == 21)
-                    blackjackCards++;
-            }
-        }
-
-        float probSafe = (float)safeCards / remainingCards * 100f;
-        float probBlackjack = (float)blackjackCards / remainingCards * 100f;
-        float probBust = (float)bustCards / remainingCards * 100f;
-
-        probMessage.text =
-            "No pasarse: " + probSafe.ToString("F1") + "%\n" +
-            "Llegar a 21: " + probBlackjack.ToString("F1") + "%\n" +
-            "Pasarse: " + probBust.ToString("F1") + "%";
-    }
-
-    private int SimulatePlayerPointsAfterDraw(int newCardValue)
-    {
-        // Simulamos la mano del jugador con la nueva carta
-        int val = 0;
-        int aces = 0;
-
-        // Cartas actuales del jugador
-        foreach (GameObject c in playerHand.cards)
-        {
-            int cardValue = c.GetComponent<CardModel>().value;
-
-            if (cardValue == 11)
-                aces++;
-            else
-                val += cardValue;
-        }
-
-        // Nueva carta hipotética
-        if (newCardValue == 11)
-            aces++;
-        else
-            val += newCardValue;
-
-        // Igual que en CardHand.Push()
-        for (int i = 0; i < aces; i++)
-        {
-            if (val + 11 <= 21)
-                val += 11;
-            else
-                val += 1;
-        }
-
-        return val;
-    }
-
-    void PushDealer()
-    {
-        if (cardIndex >= faces.Length)
-            return;
-
+        VerifyDeck();
         dealerHand.Push(faces[cardIndex], values[cardIndex]);
         cardIndex++;
     }
 
-    void PushPlayer()
+    private void PushPlayer()
     {
-        if (cardIndex >= faces.Length)
-            return;
-
+        VerifyDeck();
         playerHand.Push(faces[cardIndex], values[cardIndex]);
         cardIndex++;
         CalculateProbabilities();
     }
 
-    public void Hit()
-    {
-        if (!hitButton.interactable)
-            return;
-
-        PushPlayer();
-
-        if (playerHand.points > 21)
-        {
-            dealerHand.InitialToggle();
-            EndRound("Te has pasado de 21. Pierdes.", -apuestaActual);
-        }
-        else if (playerHand.points == 21)
-        {
-            Stand();
-        }
-        else
-        {
-            CalculateProbabilities();
-        }
-
-    }
-
-    public void Stand()
-    {
-        if (!stickButton.interactable)
-            return;
-
-        hitButton.interactable = false;
-        stickButton.interactable = false;
-
-        // Mostrar la carta oculta del dealer
-        dealerHand.InitialToggle();
-
-        // El dealer roba con 16 o menos
-        while (dealerHand.points <= 16 && cardIndex < faces.Length)
-        {
-            PushDealer();
-        }
-
-        // Comparar resultados
-        if (dealerHand.points > 21)
-        {
-            EndRound("El dealer se pasa. Ganas.", apuestaActual);
-        }
-        else if (dealerHand.points > playerHand.points)
-        {
-            EndRound("Gana el dealer.", -apuestaActual);
-        }
-        else if (dealerHand.points < playerHand.points)
-        {
-            EndRound("Gana el jugador.", apuestaActual);
-        }
-        else
-        {
-            EndRound("Empate.", 0);
-        }
-
-    }
-
-    private void EndRound(string message, int cambioBanca)
-    {
-        hitButton.interactable = false;
-        stickButton.interactable = false;
-
-        banca += cambioBanca;
-
-        finalMessage.text = message + "\nBanca: " + banca + "€";
-        probMessage.text = "";
-    }
-
     public void PlayAgain()
     {
-        hitButton.interactable = true;
-        stickButton.interactable = true;
-        finalMessage.text = "";
-        probMessage.text = "";
-
         playerHand.Clear();
         dealerHand.Clear();
-
-        cardIndex = 0;
-        ShuffleCards();
+        // Opcional: ShuffleCards() aquí si quieres barajar cada mano
         StartGame();
     }
 
+    private void EndGame(string message)
+    {
+        gameOver = true;
+        RevealDealerCard();
+        finalMessage.text = message;
+        ToggleButtons(false, false, true);
+        UpdateMoneyUI();
+    }
+
+    private void ToggleButtons(bool hit, bool stick, bool playAgain)
+    {
+        hitButton.interactable = hit;
+        stickButton.interactable = stick;
+        playAgainButton.interactable = playAgain;
+    }
+
+    private void UpdateMoneyUI()
+    {
+        if (bankMessage) bankMessage.text = "Banca: " + banca + "€";
+        if (betMessage) betMessage.text = "Apuesta: " + apuestaActual + "€";
+    }
+
+    private List<int> GetHandValues(CardHand hand)
+    {
+        List<int> handValues = new List<int>();
+        foreach (GameObject card in hand.cards)
+        {
+            handValues.Add(card.GetComponent<CardModel>().value);
+        }
+        return handValues;
+    }
+
+    private int CalculateHandValue(List<int> handValues)
+    {
+        int total = 0;
+        int aces = 0;
+
+        foreach (int value in handValues)
+        {
+            if (value == 11) aces++;
+            total += value;
+        }
+
+        // Si nos pasamos de 21, convertimos Ases de 11 a 1 (restando 10)
+        while (total > 21 && aces > 0)
+        {
+            total -= 10;
+            aces--;
+        }
+
+        return total;
+    }
+
+    private void RevealDealerCard()
+    {
+        if (dealerFirstCardHidden)
+        {
+            dealerHand.InitialToggle();
+            dealerFirstCardHidden = false;
+        }
+    }
+
+    // --- Lógica de Probabilidades Corregida ---
+    private void CalculateProbabilities()
+    {
+        if (gameOver || cardIndex >= values.Length) return;
+
+        int remaining = values.Length - cardIndex;
+        int bustCount = 0;
+        int currentPoints = CalculateHandValue(GetHandValues(playerHand));
+
+        for (int i = cardIndex; i < values.Length; i++)
+        {
+            // Simulamos pedir una carta
+            List<int> virtualHand = GetHandValues(playerHand);
+            virtualHand.Add(values[i]);
+            if (CalculateHandValue(virtualHand) > 21) bustCount++;
+        }
+
+        float probBust = (float)bustCount / remaining * 100f;
+        probMessage.text = $"Probabilidad de pasarse: {probBust:F2}%";
+    }
+
+    public void IncreaseBet() { if (gameOver || playerHand.cards.Count == 0) { apuestaActual += 10; UpdateMoneyUI(); } }
+    public void DecreaseBet() { if (gameOver || playerHand.cards.Count == 0) { if (apuestaActual > 10) apuestaActual -= 10; UpdateMoneyUI(); } }
 }
